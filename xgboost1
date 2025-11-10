@@ -1,0 +1,1063 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split, learning_curve, cross_val_score
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.metrics import (
+    confusion_matrix, classification_report, roc_curve, auc,
+    precision_recall_curve, accuracy_score, f1_score, 
+    roc_auc_score, precision_score, recall_score
+)
+from sklearn.datasets import (
+    load_iris, load_wine, load_breast_cancer, 
+    make_classification, make_moons, make_circles
+)
+import xgboost as xgb
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import warnings
+warnings.filterwarnings('ignore')
+
+# Page configuration
+st.set_page_config(
+    page_title="XGBoost Classification Explorer",
+    page_icon="🎯",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS
+st.markdown("""
+    <style>
+    .main {
+        padding: 0rem 1rem;
+    }
+    .stAlert {
+        padding: 1rem;
+        margin: 1rem 0;
+    }
+    h1 {
+        color: #1f77b4;
+        padding-bottom: 1rem;
+    }
+    h2 {
+        color: #ff7f0e;
+        padding-top: 1rem;
+    }
+    .metric-container {
+        background-color: #f0f2f6;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 0.5rem 0;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+# Title and description
+st.title("🎯 XGBoost Classification Explorer")
+st.markdown("""
+This interactive app demonstrates **XGBoost Classification** with comprehensive visualizations 
+and analysis across different datasets.
+""")
+
+# Sidebar - Dataset Selection
+st.sidebar.header("📊 Dataset Configuration")
+
+dataset_option = st.sidebar.selectbox(
+    "Select Dataset Type",
+    ["Iris", "Wine", "Breast Cancer", "Custom Classification", 
+     "Moons", "Circles", "Upload CSV"]
+)
+
+@st.cache_data
+def load_dataset(option):
+    """Load selected dataset"""
+    if option == "Iris":
+        data = load_iris()
+        df = pd.DataFrame(data.data, columns=data.feature_names)
+        df['target'] = data.target
+        target_names = data.target_names
+        
+    elif option == "Wine":
+        data = load_wine()
+        df = pd.DataFrame(data.data, columns=data.feature_names)
+        df['target'] = data.target
+        target_names = data.target_names
+        
+    elif option == "Breast Cancer":
+        data = load_breast_cancer()
+        df = pd.DataFrame(data.data, columns=data.feature_names)
+        df['target'] = data.target
+        target_names = data.target_names
+        
+    elif option == "Custom Classification":
+        X, y = make_classification(
+            n_samples=1000, n_features=10, n_informative=8,
+            n_redundant=2, n_classes=3, n_clusters_per_class=2,
+            random_state=42, flip_y=0.1
+        )
+        df = pd.DataFrame(X, columns=[f'feature_{i}' for i in range(X.shape[1])])
+        df['target'] = y
+        target_names = [f'Class_{i}' for i in range(3)]
+        
+    elif option == "Moons":
+        X, y = make_moons(n_samples=1000, noise=0.3, random_state=42)
+        df = pd.DataFrame(X, columns=['feature_0', 'feature_1'])
+        df['target'] = y
+        target_names = ['Class_0', 'Class_1']
+        
+    elif option == "Circles":
+        X, y = make_circles(n_samples=1000, noise=0.1, factor=0.5, random_state=42)
+        df = pd.DataFrame(X, columns=['feature_0', 'feature_1'])
+        df['target'] = y
+        target_names = ['Class_0', 'Class_1']
+        
+    return df, target_names
+
+# Load data
+if dataset_option != "Upload CSV":
+    df, target_names = load_dataset(dataset_option)
+    st.sidebar.success(f"✅ {dataset_option} dataset loaded!")
+else:
+    uploaded_file = st.sidebar.file_uploader("Upload CSV file", type=['csv'])
+    if uploaded_file is not None:
+        df = pd.read_csv(uploaded_file)
+        st.sidebar.success("✅ File uploaded successfully!")
+        
+        target_col = st.sidebar.selectbox("Select Target Column", df.columns)
+        df['target'] = df[target_col]
+        df = df.drop(columns=[target_col])
+        
+        # Encode target if necessary
+        if df['target'].dtype == 'object':
+            le = LabelEncoder()
+            df['target'] = le.fit_transform(df['target'])
+            target_names = le.classes_
+        else:
+            target_names = [f'Class_{i}' for i in df['target'].unique()]
+    else:
+        st.warning("⚠️ Please upload a CSV file")
+        st.stop()
+
+# Display dataset info
+st.header("📋 Dataset Overview")
+col1, col2, col3, col4 = st.columns(4)
+
+with col1:
+    st.metric("Total Samples", df.shape[0])
+with col2:
+    st.metric("Features", df.shape[1] - 1)
+with col3:
+    st.metric("Classes", df['target'].nunique())
+with col4:
+    st.metric("Missing Values", df.isnull().sum().sum())
+
+# Show dataset
+with st.expander("🔍 View Dataset", expanded=False):
+    st.dataframe(df.head(100), use_container_width=True)
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Dataset Statistics")
+        st.dataframe(df.describe(), use_container_width=True)
+    with col2:
+        st.subheader("Dataset Info")
+        buffer = df.dtypes.to_frame('Data Type')
+        buffer['Non-Null Count'] = df.count()
+        st.dataframe(buffer, use_container_width=True)
+
+# Data Visualization Section
+st.header("📊 Exploratory Data Analysis")
+
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📈 Distribution Plots", 
+    "🔥 Correlation Matrix", 
+    "📉 Class Distribution",
+    "🎨 Pair Plots"
+])
+
+with tab1:
+    st.subheader("Feature Distributions")
+    features = [col for col in df.columns if col != 'target']
+    
+    # Select features to plot
+    selected_features = st.multiselect(
+        "Select features to visualize",
+        features,
+        default=features[:min(4, len(features))]
+    )
+    
+    if selected_features:
+        fig = make_subplots(
+            rows=(len(selected_features) + 1) // 2,
+            cols=2,
+            subplot_titles=selected_features
+        )
+        
+        for idx, feature in enumerate(selected_features):
+            row = idx // 2 + 1
+            col = idx % 2 + 1
+            
+            for target_val in df['target'].unique():
+                data = df[df['target'] == target_val][feature]
+                fig.add_trace(
+                    go.Histogram(
+                        x=data,
+                        name=f'{target_names[target_val]}',
+                        opacity=0.7,
+                        showlegend=(idx == 0)
+                    ),
+                    row=row, col=col
+                )
+        
+        fig.update_layout(
+            height=300 * ((len(selected_features) + 1) // 2),
+            showlegend=True,
+            title_text="Feature Distributions by Class"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+with tab2:
+    st.subheader("Correlation Heatmap")
+    
+    # Calculate correlation
+    corr_matrix = df[features].corr()
+    
+    fig = px.imshow(
+        corr_matrix,
+        labels=dict(color="Correlation"),
+        x=corr_matrix.columns,
+        y=corr_matrix.columns,
+        color_continuous_scale='RdBu_r',
+        aspect="auto"
+    )
+    fig.update_layout(height=600)
+    st.plotly_chart(fig, use_container_width=True)
+
+with tab3:
+    st.subheader("Class Distribution")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Pie chart
+        class_counts = df['target'].value_counts()
+        fig = go.Figure(data=[go.Pie(
+            labels=[target_names[i] for i in class_counts.index],
+            values=class_counts.values,
+            hole=.3
+        )])
+        fig.update_layout(title="Class Distribution (Pie Chart)")
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col2:
+        # Bar chart
+        fig = go.Figure(data=[go.Bar(
+            x=[target_names[i] for i in class_counts.index],
+            y=class_counts.values,
+            marker_color='indianred'
+        )])
+        fig.update_layout(
+            title="Class Distribution (Bar Chart)",
+            xaxis_title="Class",
+            yaxis_title="Count"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+with tab4:
+    st.subheader("Pair Plot (First 4 Features)")
+    
+    # Limit to first 4 features for performance
+    plot_features = features[:min(4, len(features))]
+    plot_df = df[plot_features + ['target']].copy()
+    plot_df['target'] = plot_df['target'].map(
+        {i: target_names[i] for i in range(len(target_names))}
+    )
+    
+    fig = px.scatter_matrix(
+        plot_df,
+        dimensions=plot_features,
+        color='target',
+        title="Pair Plot of Features"
+    )
+    fig.update_layout(height=800)
+    st.plotly_chart(fig, use_container_width=True)
+
+# Model Configuration
+st.header("⚙️ Model Configuration")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.subheader("Training Parameters")
+    test_size = st.slider("Test Size (%)", 10, 50, 20) / 100
+    random_state = st.number_input("Random State", 0, 100, 42)
+    scale_features = st.checkbox("Scale Features", value=True)
+
+with col2:
+    st.subheader("XGBoost Hyperparameters")
+    max_depth = st.slider("Max Depth", 1, 20, 6)
+    n_estimators = st.slider("Number of Estimators", 10, 500, 100)
+    learning_rate = st.slider("Learning Rate", 0.01, 1.0, 0.1)
+    subsample = st.slider("Subsample", 0.5, 1.0, 0.8)
+
+# Advanced parameters in expander
+with st.expander("🔧 Advanced Parameters"):
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        colsample_bytree = st.slider("Column Sample by Tree", 0.5, 1.0, 0.8)
+        min_child_weight = st.slider("Min Child Weight", 1, 10, 1)
+    with col2:
+        gamma = st.slider("Gamma", 0.0, 5.0, 0.0)
+        reg_alpha = st.slider("Reg Alpha (L1)", 0.0, 5.0, 0.0)
+    with col3:
+        reg_lambda = st.slider("Reg Lambda (L2)", 0.0, 5.0, 1.0)
+
+# Train Model Button
+if st.button("🚀 Train Model", type="primary"):
+    with st.spinner("Training XGBoost model..."):
+        
+        # Prepare data
+        X = df.drop('target', axis=1)
+        y = df['target']
+        
+        # Split data
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=test_size, random_state=random_state, stratify=y
+        )
+        
+        # Scale features
+        if scale_features:
+            scaler = StandardScaler()
+            X_train = scaler.fit_transform(X_train)
+            X_test = scaler.transform(X_test)
+        
+        # Train XGBoost model
+        model = xgb.XGBClassifier(
+            max_depth=max_depth,
+            n_estimators=n_estimators,
+            learning_rate=learning_rate,
+            subsample=subsample,
+            colsample_bytree=colsample_bytree,
+            min_child_weight=min_child_weight,
+            gamma=gamma,
+            reg_alpha=reg_alpha,
+            reg_lambda=reg_lambda,
+            random_state=random_state,
+            eval_metric='mlogloss' if len(np.unique(y)) > 2 else 'logloss'
+        )
+        
+        model.fit(X_train, y_train)
+        
+        # Predictions
+        y_pred = model.predict(X_test)
+        y_pred_proba = model.predict_proba(X_test)
+        
+        # Store in session state
+        st.session_state['model'] = model
+        st.session_state['X_train'] = X_train
+        st.session_state['X_test'] = X_test
+        st.session_state['y_train'] = y_train
+        st.session_state['y_test'] = y_test
+        st.session_state['y_pred'] = y_pred
+        st.session_state['y_pred_proba'] = y_pred_proba
+        st.session_state['feature_names'] = features
+        st.session_state['target_names'] = target_names
+        
+    st.success("✅ Model trained successfully!")
+
+# Results Section
+if 'model' in st.session_state:
+    
+    st.header("📈 Model Performance")
+    
+    model = st.session_state['model']
+    X_train = st.session_state['X_train']
+    X_test = st.session_state['X_test']
+    y_train = st.session_state['y_train']
+    y_test = st.session_state['y_test']
+    y_pred = st.session_state['y_pred']
+    y_pred_proba = st.session_state['y_pred_proba']
+    feature_names = st.session_state['feature_names']
+    target_names = st.session_state['target_names']
+    
+    # Metrics
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    with col1:
+        train_accuracy = accuracy_score(y_train, model.predict(X_train))
+        st.metric("Train Accuracy", f"{train_accuracy:.4f}")
+    
+    with col2:
+        test_accuracy = accuracy_score(y_test, y_pred)
+        st.metric("Test Accuracy", f"{test_accuracy:.4f}")
+    
+    with col3:
+        precision = precision_score(y_test, y_pred, average='weighted')
+        st.metric("Precision", f"{precision:.4f}")
+    
+    with col4:
+        recall = recall_score(y_test, y_pred, average='weighted')
+        st.metric("Recall", f"{recall:.4f}")
+    
+    with col5:
+        f1 = f1_score(y_test, y_pred, average='weighted')
+        st.metric("F1-Score", f"{f1:.4f}")
+    
+    # Visualization Tabs
+    viz_tab1, viz_tab2, viz_tab3, viz_tab4, viz_tab5, viz_tab6 = st.tabs([
+        "🎯 Confusion Matrix",
+        "📊 ROC & PR Curves",
+        "⭐ Feature Importance",
+        "📉 Learning Curves",
+        "🎨 Decision Boundary",
+        "📋 Classification Report"
+    ])
+    
+    with viz_tab1:
+        st.subheader("Confusion Matrix")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Confusion Matrix
+            cm = confusion_matrix(y_test, y_pred)
+            
+            fig = px.imshow(
+                cm,
+                labels=dict(x="Predicted", y="Actual", color="Count"),
+                x=[target_names[i] for i in range(len(target_names))],
+                y=[target_names[i] for i in range(len(target_names))],
+                color_continuous_scale='Blues',
+                text_auto=True
+            )
+            fig.update_layout(title="Confusion Matrix")
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            # Normalized Confusion Matrix
+            cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+            
+            fig = px.imshow(
+                cm_normalized,
+                labels=dict(x="Predicted", y="Actual", color="Proportion"),
+                x=[target_names[i] for i in range(len(target_names))],
+                y=[target_names[i] for i in range(len(target_names))],
+                color_continuous_scale='Greens',
+                text_auto='.2f'
+            )
+            fig.update_layout(title="Normalized Confusion Matrix")
+            st.plotly_chart(fig, use_container_width=True)
+    
+    with viz_tab2:
+        st.subheader("ROC and Precision-Recall Curves")
+        
+        n_classes = len(np.unique(y_test))
+        
+        if n_classes == 2:
+            # Binary classification
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # ROC Curve
+                fpr, tpr, _ = roc_curve(y_test, y_pred_proba[:, 1])
+                roc_auc = auc(fpr, tpr)
+                
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=fpr, y=tpr,
+                    name=f'ROC curve (AUC = {roc_auc:.2f})',
+                    mode='lines'
+                ))
+                fig.add_trace(go.Scatter(
+                    x=[0, 1], y=[0, 1],
+                    name='Random Classifier',
+                    mode='lines',
+                    line=dict(dash='dash')
+                ))
+                fig.update_layout(
+                    title='ROC Curve',
+                    xaxis_title='False Positive Rate',
+                    yaxis_title='True Positive Rate'
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            
+            with col2:
+                # Precision-Recall Curve
+                precision_vals, recall_vals, _ = precision_recall_curve(
+                    y_test, y_pred_proba[:, 1]
+                )
+                
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=recall_vals, y=precision_vals,
+                    name='Precision-Recall curve',
+                    mode='lines',
+                    fill='tozeroy'
+                ))
+                fig.update_layout(
+                    title='Precision-Recall Curve',
+                    xaxis_title='Recall',
+                    yaxis_title='Precision'
+                )
+                st.plotly_chart(fig, use_container_width=True)
+        
+        else:
+            # Multi-class classification
+            from sklearn.preprocessing import label_binarize
+            
+            y_test_bin = label_binarize(y_test, classes=range(n_classes))
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # ROC Curve for each class
+                fig = go.Figure()
+                
+                for i in range(n_classes):
+                    fpr, tpr, _ = roc_curve(y_test_bin[:, i], y_pred_proba[:, i])
+                    roc_auc = auc(fpr, tpr)
+                    fig.add_trace(go.Scatter(
+                        x=fpr, y=tpr,
+                        name=f'{target_names[i]} (AUC = {roc_auc:.2f})',
+                        mode='lines'
+                    ))
+                
+                fig.add_trace(go.Scatter(
+                    x=[0, 1], y=[0, 1],
+                    name='Random',
+                    mode='lines',
+                    line=dict(dash='dash', color='black')
+                ))
+                
+                fig.update_layout(
+                    title='ROC Curves (One-vs-Rest)',
+                    xaxis_title='False Positive Rate',
+                    yaxis_title='True Positive Rate'
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            
+            with col2:
+                # Precision-Recall Curve for each class
+                fig = go.Figure()
+                
+                for i in range(n_classes):
+                    precision_vals, recall_vals, _ = precision_recall_curve(
+                        y_test_bin[:, i], y_pred_proba[:, i]
+                    )
+                    fig.add_trace(go.Scatter(
+                        x=recall_vals, y=precision_vals,
+                        name=f'{target_names[i]}',
+                        mode='lines'
+                    ))
+                
+                fig.update_layout(
+                    title='Precision-Recall Curves',
+                    xaxis_title='Recall',
+                    yaxis_title='Precision'
+                )
+                st.plotly_chart(fig, use_container_width=True)
+    
+    with viz_tab3:
+        st.subheader("Feature Importance")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Feature importance by weight
+            importance_weight = model.feature_importances_
+            feat_imp_df = pd.DataFrame({
+                'Feature': feature_names,
+                'Importance': importance_weight
+            }).sort_values('Importance', ascending=True)
+            
+            fig = go.Figure(go.Bar(
+                x=feat_imp_df['Importance'],
+                y=feat_imp_df['Feature'],
+                orientation='h',
+                marker_color='lightblue'
+            ))
+            fig.update_layout(
+                title='Feature Importance (Weight)',
+                xaxis_title='Importance',
+                yaxis_title='Features',
+                height=max(400, len(feature_names) * 20)
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            # Try to get gain importance
+            try:
+                booster = model.get_booster()
+                importance_gain = booster.get_score(importance_type='gain')
+                
+                feat_imp_gain = pd.DataFrame({
+                    'Feature': list(importance_gain.keys()),
+                    'Gain': list(importance_gain.values())
+                }).sort_values('Gain', ascending=True)
+                
+                # Map feature names
+                feat_imp_gain['Feature'] = feat_imp_gain['Feature'].apply(
+                    lambda x: feature_names[int(x[1:])] if x.startswith('f') else x
+                )
+                
+                fig = go.Figure(go.Bar(
+                    x=feat_imp_gain['Gain'],
+                    y=feat_imp_gain['Feature'],
+                    orientation='h',
+                    marker_color='lightcoral'
+                ))
+                fig.update_layout(
+                    title='Feature Importance (Gain)',
+                    xaxis_title='Gain',
+                    yaxis_title='Features',
+                    height=max(400, len(feature_names) * 20)
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            except:
+                st.info("Gain importance not available")
+    
+    with viz_tab4:
+        st.subheader("Learning Curves")
+        
+        with st.spinner("Generating learning curves..."):
+            train_sizes, train_scores, val_scores = learning_curve(
+                model, X_train, y_train,
+                cv=5,
+                n_jobs=-1,
+                train_sizes=np.linspace(0.1, 1.0, 10),
+                scoring='accuracy'
+            )
+            
+            train_mean = np.mean(train_scores, axis=1)
+            train_std = np.std(train_scores, axis=1)
+            val_mean = np.mean(val_scores, axis=1)
+            val_std = np.std(val_scores, axis=1)
+            
+            fig = go.Figure()
+            
+            # Training score
+            fig.add_trace(go.Scatter(
+                x=train_sizes, y=train_mean,
+                name='Training Score',
+                mode='lines+markers',
+                line=dict(color='blue')
+            ))
+            fig.add_trace(go.Scatter(
+                x=np.concatenate([train_sizes, train_sizes[::-1]]),
+                y=np.concatenate([train_mean + train_std, 
+                                 (train_mean - train_std)[::-1]]),
+                fill='toself',
+                fillcolor='rgba(0,0,255,0.2)',
+                line=dict(color='rgba(255,255,255,0)'),
+                showlegend=False,
+                name='Training Score Std'
+            ))
+            
+            # Validation score
+            fig.add_trace(go.Scatter(
+                x=train_sizes, y=val_mean,
+                name='Cross-validation Score',
+                mode='lines+markers',
+                line=dict(color='red')
+            ))
+            fig.add_trace(go.Scatter(
+                x=np.concatenate([train_sizes, train_sizes[::-1]]),
+                y=np.concatenate([val_mean + val_std, 
+                                 (val_mean - val_std)[::-1]]),
+                fill='toself',
+                fillcolor='rgba(255,0,0,0.2)',
+                line=dict(color='rgba(255,255,255,0)'),
+                showlegend=False,
+                name='Validation Score Std'
+            ))
+            
+            fig.update_layout(
+                title='Learning Curves',
+                xaxis_title='Training Set Size',
+                yaxis_title='Accuracy Score',
+                height=500
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        
+        # Cross-validation scores
+        st.subheader("Cross-Validation Scores")
+        cv_scores = cross_val_score(model, X_train, y_train, cv=5, scoring='accuracy')
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Mean CV Score", f"{cv_scores.mean():.4f}")
+        with col2:
+            st.metric("Std CV Score", f"{cv_scores.std():.4f}")
+        with col3:
+            st.metric("Min CV Score", f"{cv_scores.min():.4f}")
+        
+        # Plot CV scores
+        fig = go.Figure(data=[go.Bar(
+            x=[f'Fold {i+1}' for i in range(len(cv_scores))],
+            y=cv_scores,
+            marker_color='indianred'
+        )])
+        fig.add_hline(y=cv_scores.mean(), line_dash="dash", 
+                     annotation_text="Mean", line_color="green")
+        fig.update_layout(
+            title='Cross-Validation Scores by Fold',
+            xaxis_title='Fold',
+            yaxis_title='Accuracy',
+            height=400
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with viz_tab5:
+        st.subheader("Decision Boundary Visualization")
+        
+        if len(feature_names) >= 2:
+            # Select two features for visualization
+            col1, col2 = st.columns(2)
+            with col1:
+                feature_x = st.selectbox("Select X-axis feature", 
+                                        feature_names, index=0)
+            with col2:
+                feature_y = st.selectbox("Select Y-axis feature", 
+                                        feature_names, index=1)
+            
+            if feature_x != feature_y:
+                # Get indices
+                x_idx = feature_names.index(feature_x)
+                y_idx = feature_names.index(feature_y)
+                
+                # Create meshgrid
+                if isinstance(X_test, np.ndarray):
+                    X_plot = X_test[:, [x_idx, y_idx]]
+                else:
+                    X_plot = X_test.iloc[:, [x_idx, y_idx]].values
+                
+                x_min, x_max = X_plot[:, 0].min() - 1, X_plot[:, 0].max() + 1
+                y_min, y_max = X_plot[:, 1].min() - 1, X_plot[:, 1].max() + 1
+                
+                xx, yy = np.meshgrid(
+                    np.linspace(x_min, x_max, 100),
+                    np.linspace(y_min, y_max, 100)
+                )
+                
+                # Create feature array for prediction
+                mesh_features = np.zeros((xx.ravel().shape[0], X_train.shape[1]))
+                if isinstance(X_train, np.ndarray):
+                    mesh_features[:, x_idx] = xx.ravel()
+                    mesh_features[:, y_idx] = yy.ravel()
+                    # Use mean values for other features
+                    for i in range(X_train.shape[1]):
+                        if i not in [x_idx, y_idx]:
+                            mesh_features[:, i] = X_train[:, i].mean()
+                else:
+                    mesh_features[:, x_idx] = xx.ravel()
+                    mesh_features[:, y_idx] = yy.ravel()
+                    for i in range(X_train.shape[1]):
+                        if i not in [x_idx, y_idx]:
+                            mesh_features[:, i] = X_train.iloc[:, i].mean()
+                
+                # Predict
+                Z = model.predict(mesh_features)
+                Z = Z.reshape(xx.shape)
+                
+                # Plot
+                fig = go.Figure()
+                
+                # Decision boundary
+                fig.add_trace(go.Contour(
+                    x=xx[0],
+                    y=yy[:, 0],
+                    z=Z,
+                    colorscale='Viridis',
+                    opacity=0.3,
+                    showscale=False,
+                    hoverinfo='skip'
+                ))
+                
+                # Scatter plot of actual points
+                for class_val in np.unique(y_test):
+                    mask = y_test == class_val
+                    fig.add_trace(go.Scatter(
+                        x=X_plot[mask, 0],
+                        y=X_plot[mask, 1],
+                        mode='markers',
+                        name=target_names[class_val],
+                        marker=dict(size=8, line=dict(width=1, color='white'))
+                    ))
+                
+                fig.update_layout(
+                    title=f'Decision Boundary: {feature_x} vs {feature_y}',
+                    xaxis_title=feature_x,
+                    yaxis_title=feature_y,
+                    height=600
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("Please select different features for X and Y axes")
+        else:
+            st.info("Decision boundary visualization requires at least 2 features")
+    
+    with viz_tab6:
+        st.subheader("Classification Report")
+        
+        # Classification report
+        report = classification_report(
+            y_test, y_pred,
+            target_names=[target_names[i] for i in sorted(np.unique(y_test))],
+            output_dict=True
+        )
+        
+        report_df = pd.DataFrame(report).transpose()
+        st.dataframe(report_df.style.background_gradient(cmap='RdYlGn', axis=0),
+                    use_container_width=True)
+        
+        # Per-class metrics visualization
+        st.subheader("Per-Class Metrics")
+        
+        metrics_data = []
+        for i in sorted(np.unique(y_test)):
+            class_name = target_names[i]
+            if class_name in report:
+                metrics_data.append({
+                    'Class': class_name,
+                    'Precision': report[class_name]['precision'],
+                    'Recall': report[class_name]['recall'],
+                    'F1-Score': report[class_name]['f1-score'],
+                    'Support': report[class_name]['support']
+                })
+        
+        metrics_df = pd.DataFrame(metrics_data)
+        
+        fig = go.Figure()
+        fig.add_trace(go.Bar(name='Precision', x=metrics_df['Class'], 
+                            y=metrics_df['Precision']))
+        fig.add_trace(go.Bar(name='Recall', x=metrics_df['Class'], 
+                            y=metrics_df['Recall']))
+        fig.add_trace(go.Bar(name='F1-Score', x=metrics_df['Class'], 
+                            y=metrics_df['F1-Score']))
+        
+        fig.update_layout(
+            barmode='group',
+            title='Per-Class Performance Metrics',
+            xaxis_title='Class',
+            yaxis_title='Score',
+            height=500
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    
+    # Additional Analysis
+    st.header("🔬 Additional Analysis")
+    
+    analysis_tab1, analysis_tab2, analysis_tab3 = st.tabs([
+        "🎲 Prediction Probabilities",
+        "❌ Misclassified Samples",
+        "📊 Model Comparison"
+    ])
+    
+    with analysis_tab1:
+        st.subheader("Prediction Probability Distribution")
+        
+        # Get maximum probability for each prediction
+        max_probs = np.max(y_pred_proba, axis=1)
+        
+        fig = go.Figure()
+        fig.add_trace(go.Histogram(
+            x=max_probs,
+            nbinsx=50,
+            name='Max Probability',
+            marker_color='skyblue'
+        ))
+        fig.update_layout(
+            title='Distribution of Maximum Prediction Probabilities',
+            xaxis_title='Probability',
+            yaxis_title='Count',
+            height=400
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Show samples with low confidence
+        st.subheader("Low Confidence Predictions")
+        confidence_threshold = st.slider("Confidence Threshold", 0.0, 1.0, 0.7)
+        
+        low_confidence_mask = max_probs < confidence_threshold
+        if low_confidence_mask.sum() > 0:
+            low_conf_df = pd.DataFrame(X_test[low_confidence_mask])
+            low_conf_df.columns = feature_names
+            low_conf_df['Predicted'] = [target_names[i] for i in y_pred[low_confidence_mask]]
+            low_conf_df['Actual'] = [target_names[i] for i in y_test.values[low_confidence_mask]]
+            low_conf_df['Confidence'] = max_probs[low_confidence_mask]
+            
+            st.dataframe(low_conf_df, use_container_width=True)
+            st.info(f"Found {len(low_conf_df)} predictions with confidence < {confidence_threshold}")
+        else:
+            st.success(f"All predictions have confidence ≥ {confidence_threshold}")
+    
+    with analysis_tab2:
+        st.subheader("Misclassified Samples Analysis")
+        
+        # Get misclassified samples
+        misclassified_mask = y_test.values != y_pred
+        n_misclassified = misclassified_mask.sum()
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Misclassified", n_misclassified)
+        with col2:
+            st.metric("Error Rate", f"{n_misclassified/len(y_test):.2%}")
+        with col3:
+            st.metric("Correctly Classified", len(y_test) - n_misclassified)
+        
+        if n_misclassified > 0:
+            # Show misclassified samples
+            misclass_df = pd.DataFrame(X_test[misclassified_mask])
+            misclass_df.columns = feature_names
+            misclass_df['Predicted'] = [target_names[i] for i in y_pred[misclassified_mask]]
+            misclass_df['Actual'] = [target_names[i] for i in y_test.values[misclassified_mask]]
+            misclass_df['Max Probability'] = max_probs[misclassified_mask]
+            
+            st.dataframe(misclass_df, use_container_width=True)
+            
+            # Misclassification pattern
+            st.subheader("Misclassification Pattern")
+            misclass_pattern = pd.crosstab(
+                misclass_df['Actual'],
+                misclass_df['Predicted'],
+                margins=True
+            )
+            st.dataframe(misclass_pattern, use_container_width=True)
+        else:
+            st.success("🎉 Perfect classification! No misclassified samples.")
+    
+    with analysis_tab3:
+        st.subheader("Model Comparison with Other Algorithms")
+        
+        if st.button("Compare with Other Models"):
+            from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+            from sklearn.svm import SVC
+            from sklearn.linear_model import LogisticRegression
+            from sklearn.tree import DecisionTreeClassifier
+            
+            models = {
+                'XGBoost': model,
+                'Random Forest': RandomForestClassifier(n_estimators=100, random_state=42),
+                'Gradient Boosting': GradientBoostingClassifier(n_estimators=100, random_state=42),
+                'Logistic Regression': LogisticRegression(max_iter=1000, random_state=42),
+                'Decision Tree': DecisionTreeClassifier(random_state=42),
+                'SVM': SVC(probability=True, random_state=42)
+            }
+            
+            results = []
+            
+            progress_bar = st.progress(0)
+            for idx, (name, clf) in enumerate(models.items()):
+                if name != 'XGBoost':
+                    clf.fit(X_train, y_train)
+                
+                y_pred_temp = clf.predict(X_test)
+                
+                results.append({
+                    'Model': name,
+                    'Accuracy': accuracy_score(y_test, y_pred_temp),
+                    'Precision': precision_score(y_test, y_pred_temp, average='weighted'),
+                    'Recall': recall_score(y_test, y_pred_temp, average='weighted'),
+                    'F1-Score': f1_score(y_test, y_pred_temp, average='weighted')
+                })
+                
+                progress_bar.progress((idx + 1) / len(models))
+            
+            results_df = pd.DataFrame(results).sort_values('Accuracy', ascending=False)
+            
+            # Display results
+            st.dataframe(
+                results_df.style.background_gradient(cmap='RdYlGn', subset=['Accuracy', 'Precision', 'Recall', 'F1-Score']),
+                use_container_width=True
+            )
+            
+            # Visualization
+            fig = go.Figure()
+            
+            metrics = ['Accuracy', 'Precision', 'Recall', 'F1-Score']
+            for metric in metrics:
+                fig.add_trace(go.Bar(
+                    name=metric,
+                    x=results_df['Model'],
+                    y=results_df[metric]
+                ))
+            
+            fig.update_layout(
+                barmode='group',
+                title='Model Comparison',
+                xaxis_title='Model',
+                yaxis_title='Score',
+                height=500
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+# Download Section
+if 'model' in st.session_state:
+    st.header("💾 Download Results")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        # Download predictions
+        predictions_df = pd.DataFrame({
+            'Actual': [target_names[i] for i in y_test.values],
+            'Predicted': [target_names[i] for i in y_pred],
+            'Correct': y_test.values == y_pred
+        })
+        
+        for i, class_name in enumerate(target_names):
+            predictions_df[f'Prob_{class_name}'] = y_pred_proba[:, i]
+        
+        csv = predictions_df.to_csv(index=False)
+        st.download_button(
+            label="📥 Download Predictions",
+            data=csv,
+            file_name="xgboost_predictions.csv",
+            mime="text/csv"
+        )
+    
+    with col2:
+        # Download feature importance
+        feat_imp_df = pd.DataFrame({
+            'Feature': feature_names,
+            'Importance': model.feature_importances_
+        }).sort_values('Importance', ascending=False)
+        
+        csv = feat_imp_df.to_csv(index=False)
+        st.download_button(
+            label="📥 Download Feature Importance",
+            data=csv,
+            file_name="feature_importance.csv",
+            mime="text/csv"
+        )
+    
+    with col3:
+        # Download classification report
+        report = classification_report(
+            y_test, y_pred,
+            target_names=[target_names[i] for i in sorted(np.unique(y_test))],
+            output_dict=True
+        )
+        report_df = pd.DataFrame(report).transpose()
+        
+        csv = report_df.to_csv()
+        st.download_button(
+            label="📥 Download Classification Report",
+            data=csv,
+            file_name="classification_report.csv",
+            mime="text/csv"
+        )
+
+# Footer
+st.markdown("---")
+st.markdown("""
+    <div style='text-align: center'>
+        <p>Built with ❤️ using Streamlit and XGBoost</p>
+        <p>For educational purposes | © 2024</p>
+    </div>
+    """, unsafe_allow_html=True)
